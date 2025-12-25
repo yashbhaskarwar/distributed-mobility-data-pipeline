@@ -1,0 +1,22 @@
+project:
+  name: distributed-mobility-data-pipeline
+
+paths:
+  data_root: data
+  raw: data/raw
+  bronze: data/bronze_delta
+  silver: data/silver_delta
+  gold: data/gold_delta
+  logs: logs
+
+generator:
+  days: 90
+  num_users: 10000
+  num_drivers: 2000
+  num_trips: 450000
+
+spark:
+  app_name: MobilityPipeline
+  master: local[*]
+  shuffle_partitions: 200
+  timezone: UTC
