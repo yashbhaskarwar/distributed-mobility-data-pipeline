@@ -3,3 +3,5 @@ pandas
 numpy
 faker
 pyspark
+delta-spark
+pyarrow
