@@ -1,23 +1,19 @@
 import sys
-sys.path.append('.')
 
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import (
     col, lag, lead, avg, sum as spark_sum, count, max as spark_max,
     stddev, when, lit, datediff, hour, dayofweek, 
-    countDistinct as f_countDistinct,
-)
+    countDistinct as f_countDistinct, col, date_trunc, count as f_count,
+    to_date, hour, avg as f_avg )
 from pyspark.sql.window import Window
 from src.utils.spark_session import get_spark_session
 from src.utils.delta_utils import read_delta, write_delta_overwrite, ensure_path
 from src.utils.logger import setup_logger
 from typing import Optional
-from pyspark.sql.functions import col, date_trunc, count as f_count
-from pyspark.sql.functions import to_date, hour
-from pyspark.sql.functions import avg as f_avg
 import yaml
 
-logger = setup_logger(__name__, 'feature_engineering')
+logger = setup_logger(__name__, 'logs')
 
 class DeltaLakeManager:
     def __init__(self, spark):
@@ -82,6 +78,8 @@ class FeatureEngineer:
             .withColumn("trip_date", to_date(col("hour_ts")))
             .withColumn("hour", hour(col("hour_ts")))
         )
+
+        hourly_demand = hourly_demand.cache()
 
         demand_features = hourly_demand.join(
             hourly_surge,
@@ -189,7 +187,7 @@ class FeatureEngineer:
             .filter(col("status") == "completed")
             .groupBy("hour_ts", "trip_date", "hour", "pickup_location_id")
             .agg(
-                count("*").alias("trip_count"),
+                f_count("*").alias("trip_count"),
                 f_countDistinct("driver_key").alias("driver_count"),
                 f_avg(col("surge_multiplier")).alias("avg_surge"),
                 spark_max(col("surge_multiplier")).alias("max_surge"),
@@ -205,6 +203,8 @@ class FeatureEngineer:
             .withColumn("day_of_week", dayofweek(col("trip_date")))
             .withColumn("is_weekend", when(col("day_of_week").isin([1, 7]), 1).otherwise(0))
         )
+
+        surge_agg = surge_agg.cache()
 
         # Time-based features
         surge_features = (
@@ -244,7 +244,7 @@ class FeatureEngineer:
             )
         )
 
-        surge_features = surge_features.na.drop()
+        surge_features = surge_features.na.drop(subset=["surge_lag_1", "demand_supply_lag_1"])
 
         feature_cols = [
             "trip_date", "hour", "day_of_week", "is_weekend",
