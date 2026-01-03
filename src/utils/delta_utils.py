@@ -35,4 +35,16 @@ def write_delta_overwrite(
 
 def ensure_path(path: str) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
-    
+
+class DeltaLakeManager:
+    def __init__(self, spark):
+        self.spark = spark
+
+    def is_delta_table(self, path: str) -> bool:
+        return is_delta_table(self.spark, path)
+
+    def read_delta(self, path: str):
+        return read_delta(self.spark, path)
+
+    def write_delta_overwrite(self, df, path: str):
+        return write_delta_overwrite(df, path)
