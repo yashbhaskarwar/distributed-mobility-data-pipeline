@@ -20,3 +20,7 @@ spark:
   master: local[*]
   shuffle_partitions: 200
   timezone: UTC
+
+mlflow:
+  tracking_uri: "file:./mlruns"
+  experiment_name: "distributed-mobility"
