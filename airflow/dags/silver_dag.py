@@ -14,7 +14,7 @@ from src.utils.spark_session import get_spark_session
 from src.utils.delta_utils import DeltaLakeManager
 from src.utils.logger import setup_logger
 
-logger = setup_logger(__name__)
+logger = setup_logger(__name__,"logs")
 
 default_args = {
     'owner': 'data-team',

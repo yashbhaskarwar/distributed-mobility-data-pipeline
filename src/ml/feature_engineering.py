@@ -13,7 +13,7 @@ from src.utils.logger import setup_logger
 from typing import Optional
 import yaml
 
-logger = setup_logger(__name__, 'logs')
+logger = setup_logger(__name__, "logs")
 
 class DeltaLakeManager:
     def __init__(self, spark):

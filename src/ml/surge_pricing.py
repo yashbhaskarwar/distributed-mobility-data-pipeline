@@ -11,7 +11,7 @@ from src.utils.delta_utils import DeltaLakeManager
 from src.utils.logger import setup_logger
 import yaml
 
-logger = setup_logger(__name__, 'logs')
+logger = setup_logger(__name__, "logs")
 
 class SurgePricingModel:
     
