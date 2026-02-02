@@ -1,8 +1,8 @@
 # Distributed Mobility Data Pipeline
-Production grade data pipeline for large scale mobility events using PySpark, Delta Lake, and a medallion architecture.
+Production grade data pipeline for large scale mobility events using PySpark, Delta Lake and a medallion architecture.
 
 ## Overview
-This project implements a production style data engineering pipeline for large scale mobility and ride activity data. The system processes raw event data through a medallion architecture (Bronze, Silver, Gold), models it using a star schema and produces analytics ready aggregate tables.
+This project implements a production style data engineering pipeline for large scale mobility and ride activity data. The system processes raw event data through a medallion architecture (Bronze, Silver, Gold), models it using a star schema and produces analytics ready aggregate tables. The pipeline also includes feature engineering and machine learning workflows for demand forecasting and surge pricing.
 
 ##  System Architechture
 ```bash
@@ -24,6 +24,12 @@ Silver Layer (Delta Lake)
 Gold Layer (Delta Lake)
 - Star schema (dimensions + facts)
 - Analytics aggregates
+   |
+   v
+ML Layer
+- Feature engineering
+- Demand forecasting
+- Surge pricing models
 ```
 
 ## Project Structure
@@ -31,7 +37,10 @@ Gold Layer (Delta Lake)
 distributed-mobility-data-pipeline/
 ├── airflow/
 │   └── dags/
-│       └── bronze_ingestion_dag.py
+│       ├── bronze_ingestion_dag.py
+│       ├── silver_dag.py
+│       ├── ml_training_dag.py
+│       └── gold_dag.py
 ├── config/
 │   └── config.yaml
 ├── src/
@@ -43,6 +52,10 @@ distributed-mobility-data-pipeline/
 │   │   ├── bronze_to_silver.py
 │   │   ├── silver_to_gold.py
 │   │   └── gold_aggregates.py
+│   ├── ml/
+│   │   ├── feature_engineering.py
+│   │   ├── demand_forecasting.py
+│   │   └── surge_pricing.py
 │   └── utils/
 │       ├── config.py
 │       ├── logger.py
@@ -94,4 +107,18 @@ py -3.9 -m tests.test_gold_schema
 ```bash
 py -3.9 -m src.transformation.gold_aggregates
 py -3.9 -m tests.test_gold_aggregates
+```
+
+### 7. Run ML workflows locally
+```bash
+py -3.9 -m src.ml.feature_engineering
+py -3.9 -m src.ml.demand_forecasting
+py -3.9 -m src.ml.surge_pricing
+```
+
+### 8. Airflow Orchestration
+```bash
+1. Start the Airflow scheduler and webserver.
+2. Enable the required DAGs.
+3. Trigger the Bronze, Silver, ML training and Gold DAGs via schedule.
 ```
