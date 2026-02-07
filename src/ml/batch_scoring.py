@@ -2,12 +2,16 @@ import argparse
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any
-
+from typing import Optional, Dict, Any, Tuple
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import SparkSession
+import pandas as pd
+from pyspark.sql.functions import pandas_udf
+from pyspark.sql.types import DoubleType
 
+# Delta merge
+from delta.tables import DeltaTable
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -43,6 +47,21 @@ def load_local_model(model_path: str) -> Optional[Any]:
 def read_silver_features(spark: SparkSession, path: str) -> DataFrame:
     return spark.read.format("delta").load(path)
 
+def ensure_partition_cols(df: DataFrame) -> DataFrame:
+    if "event_date" not in df.columns:
+        # try to derive from a timestamp field if present
+        if "event_ts" in df.columns:
+            df = df.withColumn("event_date", F.to_date(F.col("event_ts")))
+        elif "timestamp" in df.columns:
+            df = df.withColumn("event_date", F.to_date(F.col("timestamp")))
+        else:
+            df = df.withColumn("event_date", F.to_date(F.lit(datetime.utcnow().strftime("%Y-%m-%d"))))
+
+    if "city" not in df.columns:
+        df = df.withColumn("city", F.lit("unknown"))
+
+    return df
+
 def score_demand(df: DataFrame, demand_model: Optional[Any]) -> DataFrame:
     required_cols = ["hour", "is_weekend", "demand_avg_7d", "avg_surge"]
     for c in required_cols:
@@ -50,7 +69,6 @@ def score_demand(df: DataFrame, demand_model: Optional[Any]) -> DataFrame:
             raise ValueError(f"Missing required column for demand scoring: {c}")
 
     if demand_model is None:
-        # Fallback logic
         return df.withColumn(
             "predicted_demand",
             F.round(
@@ -62,11 +80,6 @@ def score_demand(df: DataFrame, demand_model: Optional[Any]) -> DataFrame:
                 2,
             ),
         )
-
-    # Model-based scoring using Pandas UDF
-    import pandas as pd
-    from pyspark.sql.functions import pandas_udf
-    from pyspark.sql.types import DoubleType
 
     feature_cols = [
         "hour",
@@ -90,6 +103,7 @@ def score_demand(df: DataFrame, demand_model: Optional[Any]) -> DataFrame:
 
     return df.withColumn("predicted_demand", F.round(predict_demand_udf(*[F.col(c) for c in feature_cols]), 2))
 
+
 def score_surge(df: DataFrame, surge_model: Optional[Any]) -> DataFrame:
     if "predicted_demand" not in df.columns:
         raise ValueError("predicted_demand must exist before surge scoring")
@@ -110,11 +124,6 @@ def score_surge(df: DataFrame, surge_model: Optional[Any]) -> DataFrame:
         raw = F.lit(1.0) * demand_factor * supply_factor * rain_factor
         return df.withColumn("predicted_surge_multiplier", F.round(F.least(F.greatest(raw, F.lit(1.0)), F.lit(3.0)), 3))
 
-    # Model-based scoring using Pandas UDF
-    import pandas as pd
-    from pyspark.sql.functions import pandas_udf
-    from pyspark.sql.types import DoubleType
-
     feature_cols = [
         "predicted_demand",
         "supply_index",
@@ -128,7 +137,6 @@ def score_surge(df: DataFrame, surge_model: Optional[Any]) -> DataFrame:
         X = pd.concat(cols, axis=1)
         X.columns = feature_cols
         preds = surge_model.predict(X)
-        # Bound to a realistic range
         preds = pd.Series(preds).astype(float).clip(lower=1.0, upper=3.0)
         return preds
 
@@ -140,28 +148,101 @@ def add_run_metadata(df: DataFrame, run_id: str) -> DataFrame:
         .withColumn("scored_at_utc", F.lit(datetime.utcnow().isoformat()))
     )
 
+def pick_primary_key_cols(df: DataFrame) -> Tuple[str, ...]:
+    if "event_id" in df.columns:
+        return ("event_id",)
+    if all(c in df.columns for c in ["city", "zone_name", "event_ts"]):
+        return ("city", "zone_name", "event_ts")
+    if all(c in df.columns for c in ["city", "zone_name", "hour", "event_date"]):
+        return ("city", "zone_name", "hour", "event_date")
+    # last-resort key (not ideal but keeps pipeline functional)
+    return ("city", "event_date")
 
-def write_predictions(df: DataFrame, out_path: str, partition_col: str = "event_date") -> None:
-    writer = df.write.format("delta").mode("append")
-    if partition_col in df.columns:
-        writer = writer.partitionBy(partition_col)
-    writer.save(out_path)
+def write_predictions_merge(df: DataFrame, out_path: str) -> None:
+    df = ensure_partition_cols(df)
+    pk_cols = pick_primary_key_cols(df)
+
+    merge_cond_parts = [f"t.{c} = s.{c}" for c in pk_cols if c in df.columns]
+    merge_cond_parts.append("t.scoring_run_id = s.scoring_run_id")
+    merge_condition = " AND ".join(merge_cond_parts)
+
+    if not DeltaTable.isDeltaTable(df.sparkSession, out_path):
+        (
+            df.write.format("delta")
+            .mode("overwrite")
+            .partitionBy("event_date", "city")
+            .save(out_path)
+        )
+        return
+
+    delta_tbl = DeltaTable.forPath(df.sparkSession, out_path)
+
+    (
+        delta_tbl.alias("t")
+        .merge(df.alias("s"), merge_condition)
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+
+def compute_error_metrics(df: DataFrame) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {}
+
+    # Demand metrics
+    demand_label = "actual_demand" if "actual_demand" in df.columns else ("demand" if "demand" in df.columns else None)
+    if demand_label and "predicted_demand" in df.columns:
+        d = df.select(F.col(demand_label).cast("double").alias("y"), F.col("predicted_demand").cast("double").alias("yhat")).dropna()
+        if d.take(1):
+            agg = d.select(
+                F.avg(F.abs(F.col("y") - F.col("yhat"))).alias("mae"),
+                F.sqrt(F.avg(F.pow(F.col("y") - F.col("yhat"), 2))).alias("rmse"),
+                F.avg(
+                    F.when(F.col("y") != 0, F.abs((F.col("y") - F.col("yhat")) / F.col("y"))).otherwise(None)
+                ).alias("mape"),
+            ).collect()[0]
+            metrics["demand_mae"] = float(agg["mae"]) if agg["mae"] is not None else None
+            metrics["demand_rmse"] = float(agg["rmse"]) if agg["rmse"] is not None else None
+            metrics["demand_mape"] = float(agg["mape"]) if agg["mape"] is not None else None
+
+    # Surge metrics
+    surge_label = (
+        "actual_surge_multiplier"
+        if "actual_surge_multiplier" in df.columns
+        else ("surge_multiplier" if "surge_multiplier" in df.columns else None)
+    )
+    if surge_label and "predicted_surge_multiplier" in df.columns:
+        s = df.select(F.col(surge_label).cast("double").alias("y"), F.col("predicted_surge_multiplier").cast("double").alias("yhat")).dropna()
+        if s.take(1):
+            agg = s.select(
+                F.avg(F.abs(F.col("y") - F.col("yhat"))).alias("mae"),
+                F.sqrt(F.avg(F.pow(F.col("y") - F.col("yhat"), 2))).alias("rmse"),
+                F.avg(
+                    F.when(F.col("y") != 0, F.abs((F.col("y") - F.col("yhat")) / F.col("y"))).otherwise(None)
+                ).alias("mape"),
+            ).collect()[0]
+            metrics["surge_mae"] = float(agg["mae"]) if agg["mae"] is not None else None
+            metrics["surge_rmse"] = float(agg["rmse"]) if agg["rmse"] is not None else None
+            metrics["surge_mape"] = float(agg["mape"]) if agg["mape"] is not None else None
+
+    return metrics
 
 def write_metrics(spark: SparkSession, metrics_out: str, run_id: str, df: DataFrame) -> None:
     total = df.count()
     null_demand = df.filter(F.col("predicted_demand").isNull()).count() if "predicted_demand" in df.columns else None
     null_surge = df.filter(F.col("predicted_surge_multiplier").isNull()).count() if "predicted_surge_multiplier" in df.columns else None
 
-    rows = [
-        {
-            "scoring_run_id": run_id,
-            "scored_at_utc": datetime.utcnow().isoformat(),
-            "total_rows": total,
-            "null_predicted_demand": null_demand,
-            "null_predicted_surge_multiplier": null_surge,
-        }
-    ]
-    spark.createDataFrame(rows).write.format("delta").mode("append").save(metrics_out)
+    extra = compute_error_metrics(df)
+
+    row = {
+        "scoring_run_id": run_id,
+        "scored_at_utc": datetime.utcnow().isoformat(),
+        "total_rows": total,
+        "null_predicted_demand": null_demand,
+        "null_predicted_surge_multiplier": null_surge,
+        **extra,
+    }
+
+    spark.createDataFrame([row]).write.format("delta").mode("append").save(metrics_out)
 
 def main():
     defaults = default_paths()
@@ -188,14 +269,18 @@ def main():
     surge_model = load_local_model(args.surge_model)
 
     df = read_silver_features(spark, args.silver_features)
+    df = ensure_partition_cols(df)
+
     df = score_demand(df, demand_model)
     df = score_surge(df, surge_model)
     df = add_run_metadata(df, run_id)
 
-    write_predictions(df, args.predictions_out)
+    # merge write
+    write_predictions_merge(df, args.predictions_out)
+    # metrics write
     write_metrics(spark, args.metrics_out, run_id, df)
-
     print("[BatchScoring] Done")
 
 if __name__ == "__main__":
     main()
+    
