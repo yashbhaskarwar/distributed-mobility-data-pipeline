@@ -25,7 +25,27 @@ def default_paths() -> Dict[str, str]:
         "predictions_delta": str(root / "data" / "gold" / "batch_predictions"),
         "monitoring_out": str(root / "data" / "gold" / "model_monitoring_metrics"),
         "api_logs_dir": str(root / "data" / "api_logs"),
+        "drift_out": str(root / "data" / "gold" / "model_drift_details"),
+        "config_yaml": str(root / "config" / "config.yaml"),
     }
+
+def load_yaml_config(path: str) -> Dict[str, Any]:
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        import yaml
+        return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+def deep_get(d: Dict[str, Any], keys: List[str], default: Any) -> Any:
+    cur: Any = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
 def compute_regression_metrics(df: DataFrame, y_col: str, yhat_col: str) -> Dict[str, Optional[float]]:
     d = df.select(F.col(y_col).cast("double").alias("y"), F.col(yhat_col).cast("double").alias("yhat")).dropna()
@@ -178,6 +198,8 @@ def main():
     parser.add_argument("--api_logs_dir", default=os.getenv("API_LOGS_DIR", defaults["api_logs_dir"]))
     parser.add_argument("--baseline_days", type=int, default=int(os.getenv("BASELINE_DAYS", "14")))
     parser.add_argument("--current_days", type=int, default=int(os.getenv("CURRENT_DAYS", "1")))
+    parser.add_argument("--drift_out", default=os.getenv("DRIFT_OUT_PATH", defaults["drift_out"]))
+    parser.add_argument("--config_yaml", default=os.getenv("CONFIG_YAML_PATH", defaults["config_yaml"]))
 
     # Drift thresholds
     parser.add_argument("--psi_warn", type=float, default=float(os.getenv("PSI_WARN", "0.1")))
@@ -185,6 +207,14 @@ def main():
     parser.add_argument("--missing_shift_warn", type=float, default=float(os.getenv("MISSING_SHIFT_WARN", "0.05")))
 
     args = parser.parse_args()
+
+    cfg = load_yaml_config(args.config_yaml)
+
+    args.psi_warn = float(os.getenv("PSI_WARN", str(deep_get(cfg, ["monitoring", "psi_warn"], args.psi_warn))))
+    args.psi_crit = float(os.getenv("PSI_CRIT", str(deep_get(cfg, ["monitoring", "psi_crit"], args.psi_crit))))
+    args.missing_shift_warn = float(os.getenv("MISSING_SHIFT_WARN", str(deep_get(cfg, ["monitoring", "missing_shift_warn"], args.missing_shift_warn))))
+
+    volume_drop_ratio = float(os.getenv("VOLUME_DROP_RATIO", str(deep_get(cfg, ["monitoring", "volume_drop_ratio"], 0.3))))
 
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
@@ -253,12 +283,32 @@ def main():
         if shift is not None and shift >= args.missing_shift_warn:
             emit_alert(f"Missing rate shift for {col}: shift={shift:.3f}")
 
+    # Write drift details as a separate Delta table (one row per feature)
+    drift_rows = []
+    for feature, vals in drift_results.items():
+        drift_rows.append({
+            "monitoring_run_id": run_id,
+            "generated_at_utc": datetime.utcnow().isoformat(),
+            "baseline_start": base_start,
+            "baseline_end": base_end,
+            "current_start": cur_start,
+            "current_end": cur_end,
+            "feature": feature,
+            "psi": vals.get("psi"),
+            "baseline_missing_rate": vals.get("baseline_missing_rate"),
+            "current_missing_rate": vals.get("current_missing_rate"),
+            "missing_rate_shift": vals.get("missing_rate_shift"),
+        })
+
+    if drift_rows:
+        spark.createDataFrame(drift_rows).write.format("delta").mode("append").save(args.drift_out)
+
     # Latency checks 
     events = read_api_jsonl_logs(args.api_logs_dir, days=args.current_days)
     lat = latency_stats(events)
 
     # Prediction volume alerts 
-    if base_count > 0 and cur_count < max(1, int(base_count * 0.3)):
+    if base_count > 0 and cur_count < max(1, int(base_count * volume_drop_ratio)):
         emit_alert(f"Prediction volume drop: baseline={base_count}, current={cur_count}")
 
     record = {
@@ -289,4 +339,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
