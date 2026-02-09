@@ -24,3 +24,9 @@ spark:
 mlflow:
   tracking_uri: "file:./mlruns"
   experiment_name: "distributed-mobility"
+
+monitoring:
+  psi_warn: 0.1
+  psi_crit: 0.2
+  missing_shift_warn: 0.05
+  volume_drop_ratio: 0.3
