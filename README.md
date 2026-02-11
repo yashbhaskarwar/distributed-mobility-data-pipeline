@@ -30,6 +30,27 @@ ML Layer
 - Feature engineering
 - Demand forecasting
 - Surge pricing models
+   |
+   v
+Batch Scoring (Spark + Delta)
+- Large-scale inference
+- Partitioned predictions
+- Idempotent merge writes
+   |
+   v
+Real-Time API 
+- Demand prediction endpoint
+- Surge prediction endpoint
+- Batch inference endpoint
+- Health checks and model metadata
+   |
+   v
+Monitoring & Drift Detection
+- MAE / RMSE / MAPE tracking
+- PSI-based feature drift detection
+- Missing rate shift monitoring
+- Prediction volume monitoring
+- API latency tracking
 ```
 
 ## Project Structure
@@ -55,6 +76,8 @@ distributed-mobility-data-pipeline/
 │   ├── ml/
 │   │   ├── feature_engineering.py
 │   │   ├── demand_forecasting.py
+│   │   ├── batch_scoring.py
+│   │   ├── model_monitoring.py
 │   │   └── surge_pricing.py
 │   └── utils/
 │       ├── config.py
@@ -67,7 +90,8 @@ distributed-mobility-data-pipeline/
 │   ├── test_bronze_ingestion.py
 │   ├── test_silver_transformation.py
 │   ├── test_gold_aggregates.py
-│   └── test_gold_schema.py
+│   ├── test_gold_schema.py
+│   └── test_complete_pipeline.py
 ├── requirements.txt
 └── README.md
 ```
