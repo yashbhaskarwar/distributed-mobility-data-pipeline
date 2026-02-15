@@ -146,3 +146,36 @@ py -3.9 -m src.ml.surge_pricing
 2. Enable the required DAGs.
 3. Trigger the Bronze, Silver, ML training and Gold DAGs via schedule.
 ```
+
+### 9. Start Real-Time Inference API
+```bash
+uvicorn src.api.app:app --reload
+```
+Health check
+```bash
+curl http://localhost:8000/health
+```
+
+### 10. Run batch scoring
+```bash
+py -3.9 -m src.ml.batch_scoring \
+  --silver_features ./data/features/silver_features \
+  --predictions_out ./data/gold/batch_predictions \
+  --metrics_out ./data/gold/batch_scoring_metrics
+```
+Outputs:
+- data/gold/batch_predictions (Delta)
+- data/gold/batch_scoring_metrics (Delta)
+
+### 11. Run Model Monitoring
+```bash
+py -3.9 -m src.ml.model_monitoring \
+  --predictions_delta ./data/gold/batch_predictions \
+  --monitoring_out ./data/gold/model_monitoring_metrics \
+  --drift_out ./data/gold/model_drift_details
+```
+
+### 12. Run Complete Pipeline Tests
+```bash
+pytest tests/test_complete_pipeline.py
+```
